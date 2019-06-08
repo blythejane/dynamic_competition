@@ -1,0 +1,558 @@
+---
+title: "Seattle HIV Vaccine PrEP Model"
+author: "Blythe Adamson"
+date: "10/26/2018"
+output: 
+  html_document:
+    theme: yeti
+    highlight: tango
+    toc: true
+    toc_float: true
+---
+
+__Date generated:__ `r format(Sys.time(), '%d %B %Y')`
+
+__Dynamic output used:__ May 30, 2018
+
+
+***
+# Overvie
+***
+
+### Purpose
+
+This code analyzes output from a dynamic transmission model of HIV, add costs and quality of life adjustment, and performs sensitivity analyses. 
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(fig.width = 10,
+                      fig.height = 8,
+                      echo = FALSE,
+                      warning = FALSE,
+                      message = FALSE)
+
+options(scipen = 999)
+
+library(ggplot2)
+library(reshape2)
+library(dplyr)
+library(RColorBrewer)
+library(scales)
+library(stringr)
+library(kableExtra)
+
+```
+
+``` {r load data, cache = TRUE}
+
+source('functions.R')
+
+source('params.R')
+
+source('costs.R')
+
+source("costs.R")
+    # if determinitic (probs = FALSE), then this produces a vector of costs
+    # if probabilistic, this produces a matrix for the number of simulations
+
+# load results from dynamic transmission model simulations
+
+# reference group
+hiv_ref <- read.csv(file = "../dynamic/raw/05Jun19/seattle_baseN.csv")
+
+# primary result: 50% effectie vaccine
+hiv_pv <- read.csv(file = "../dynamic/raw/05Jun19/seattle_vac50N.csv")
+
+# sensitivity analysis: 70% effective vaccine
+hiv_pv30 <- read.csv(file = "../dynamic/raw/05Jun19/seattle_vac30N.csv")
+
+# sensitivity analysis: 70% effective vaccine
+hiv_pv70 <- read.csv(file = "../dynamic/raw/05Jun19/seattle_vac70N.csv")
+
+# scenario: no condom replacement, uses 50% efficacy
+hiv_pvNC <- read.csv(file = "../dynamic/raw/05Jun19/seattle_vacNC.csv")
+
+```
+
+```{r pop size}
+# POP SIZE --------------------------------------------------------------------
+
+# Add variable for population size and year to each row
+hiv_ref <- PopSize(hiv_ref, trt = ref)
+
+hiv_pv  <- PopSize(hiv_pv, trt = pv)
+
+hiv_pv70  <- PopSize(hiv_pv70, trt = pv)
+
+hiv_pv30  <- PopSize(hiv_pv30, trt = pv)
+
+hiv_pvNC  <- PopSize(hiv_pvNC, trt = pv)
+
+n.i <- mean(hiv_ref$popsize) # average population size in reference case across years
+
+mean(hiv_pv$popsize) - mean(hiv_ref$popsize) # mean difference in pop size, extra person-time
+
+# Create a table of the population size changing over time
+Case <- c("Reference: PrEP alone", "Intervention: Vaccine + PrEP")
+
+Today_2018 <- c(hiv_ref$popsize[1],hiv_pv$popsize[1])
+
+Year_2025 <- c(hiv_ref$popsize[hiv_ref$Time == 2025],hiv_pv$popsize[hiv_ref$Time == 2025])
+
+End_2045 <- c(hiv_ref$popsize[hiv_ref$Time == 2045],hiv_pv$popsize[hiv_ref$Time == 2045])
+
+Growth <- c(hiv_ref$popsize[hiv_ref$Time == 2045] - 
+              hiv_ref$popsize[1],hiv_pv$popsize[hiv_ref$Time == 2045] - hiv_pv$popsize[1])
+
+Percent_Growth <- c((hiv_ref$popsize[hiv_ref$Time == 2045] - hiv_ref$popsize[1])/hiv_ref$popsize[1],
+                    (hiv_pv$popsize[hiv_ref$Time == 2045] - hiv_pv$popsize[1])/hiv_pv$popsize[1])
+
+table_popsize <- cbind.data.frame(Case, Today_2018, Year_2025, End_2045, Growth, Percent_Growth)
+
+```
+
+```{r time horizon}
+# TIME HORIZON ---------------------------------------------------------------
+horizon_withcalibration <- max(hiv_ref$Time) - min(hiv_ref$Time)
+
+horizon_withcalibration
+
+horizon <- max(hiv_ref$Time) - 2025
+
+```
+
+The model time horizon was `r horizon` years, ending in year `r max(hiv_ref$Time)`.
+There were `r hiv_pv$popsize[nrow(hiv_ref)] - hiv_ref$popsize[nrow(hiv_ref)]` additional people
+alive at the end of the time horizon. 
+
+
+#### Table. Population sizes at the start and end of the time horizon
+```{r}
+table_popsize %>%
+  kable() %>%
+  kable_styling()
+```
+
+
+
+## Health States and Utility
+
+#### Table. Health states stratified by prevention, HIV status, CD4 count, treatment, and viral suppression
+
+```{r health states}
+
+# Define the attributes of each health state
+
+state_names <- colnames(hiv_ref[,3:60])
+
+states_n <- length(state_names)
+
+source("StateAttributes.R") 
+
+states <- DefineStates(state_names)  # data frame with indicator variables
+
+save(states, file = "states.rda")
+
+aware_labels <- unique(na.omit(states$aware))
+
+cd4_labels <- unique(na.omit(states$cd4))
+
+care_labels <- unique(na.omit(states$care))
+
+# UTILITY --------------------------------------------------------------
+# add utility weights for each health state
+states <- UtilityWeights(states)
+
+states %>%
+  kable() %>%
+  kable_styling()
+```
+
+
+
+```{r utilization}
+# Probability of using PrEP vs Vaccines
+hiv_ref$pPrEP <- rowSums(hiv_ref[,c(5,6,9,10)])/rowSums(hiv_ref[,3:10])
+hiv_ref$pVacc <- rowSums(hiv_ref[,7:8])/rowSums(hiv_ref[,c(3:10)])
+
+hiv_pv$pPrEP <- rowSums(hiv_pv[,c(5,6,9,10)])/rowSums(hiv_ref[,c(3:10)])
+hiv_pv$pVacc <- rowSums(hiv_pv[,7:8])/rowSums(hiv_ref[,c(3:10)])
+
+hiv_pv30$pPrEP <- rowSums(hiv_pv30[,c(5,6,9,10)])/rowSums(hiv_ref[,c(3:10)])
+hiv_pv30$pVacc <- rowSums(hiv_pv30[,7:8])/rowSums(hiv_ref[,c(3:10)])
+
+hiv_pv70$pPrEP <- rowSums(hiv_pv70[,c(5,6,9,10)])/rowSums(hiv_ref[,c(3:10)])
+hiv_pv70$pVacc <- rowSums(hiv_pv70[,7:8])/rowSums(hiv_ref[,c(3:10)])
+
+hiv_pvNC$pPrEP <- rowSums(hiv_pvNC[,c(5,6,9,10)])/rowSums(hiv_ref[,c(3:10)])
+hiv_pvNC$pVacc <- rowSums(hiv_pvNC[,7:8])/rowSums(hiv_ref[,c(3:10)])
+```
+
+
+```{r outcomes}
+# HEALTH OUTCOMES ------------------------------------------------------------
+
+# LIFE YEARS (LY)-------------------------------------------------------------
+hiv_ref_ly <- GetPersonTime(hiv_ref)  # see functions.R
+hiv_pv_ly <- GetPersonTime(hiv_pv)    # see functions.R
+hiv_pv30_ly <- GetPersonTime(hiv_pv30)    # see functions.R
+hiv_pv70_ly <- GetPersonTime(hiv_pv70)    # see functions.R
+hiv_pvNC_ly <- GetPersonTime(hiv_pvNC)    # see functions.R
+
+# QALYs discounted-------------------------------------------------------------
+hiv_ref_qaly <- GetQALYs(hiv_ref_ly)
+hiv_pv_qaly  <- GetQALYs(hiv_pv_ly)
+hiv_pv30_qaly  <- GetQALYs(hiv_pv30_ly)
+hiv_pv70_qaly  <- GetQALYs(hiv_pv70_ly)
+hiv_pvNC_qaly  <- GetQALYs(hiv_pvNC_ly)
+
+# Collapse life years into annual and by care cascade categories
+hiv_ref <- CareCascadeSummary(hiv_ref) # sums S and I compartments
+hiv_pv <- CareCascadeSummary(hiv_pv)
+hiv_pv30 <- CareCascadeSummary(hiv_pv30)
+hiv_pv70 <- CareCascadeSummary(hiv_pv70)
+hiv_pvNC <- CareCascadeSummary(hiv_pvNC)
+
+# COSTS ------------------------------------------------------------
+
+cPrep <- (1049.91*3) # FSS pricing of $1,049.91 from CCST in March 2018
+  # cost for 3-months supply  
+  
+cVaccine <- (1623.72*(3/5)*1.3) #upfront one-time cost for 5-dose series of vaccine  
+  # benchmarking reference: FSS price of Guardasil 9 is 1623.72 per dose
+  # excludes delivery costs and labs
+
+C <- GetCostParams(prob = FALSE, nsims = 1, cVaccine = cVaccine, cPrep = cPrep, societal = FALSE)
+
+              # examine health state costs to check for errors
+              #C 
+              #dim(C)
+              #length(C)
+              #dim(hiv_ref_ly)
+
+hiv_ref_cost <- CostingCalc(hiv_ref_ly, C)
+
+hiv_pv_cost <- CostingCalc(hiv_pv_ly, C)
+
+hiv_pv30_cost <- CostingCalc(hiv_pv30_ly, C)
+
+hiv_pv70_cost <- CostingCalc(hiv_pv70_ly, C)
+
+hiv_pvNC_cost <- CostingCalc(hiv_pvNC_ly, C)
+
+```
+
+
+# Results
+
+```{r results tables}
+# ------------------------------------------------------------------------------
+# RESULTS 
+# ------------------------------------------------------------------------------
+
+#' Create results table for manuscript with HIV infections, PrEP use, life years, 
+#'    QALYs, total cost, prep cost, vaccine cost, and ICER 
+
+table_results <- GetResultsTable(hiv_ref, hiv_ref_ly, hiv_ref_qaly, hiv_ref_cost, 
+                                 hiv_pv, hiv_pv_ly, hiv_pv_qaly, hiv_pv_cost)
+
+table_results30 <- GetResultsTable(hiv_ref, hiv_ref_ly, hiv_ref_qaly, hiv_ref_cost, 
+                                 hiv_pv30, hiv_pv30_ly, hiv_pv30_qaly, hiv_pv30_cost)
+
+table_results70 <- GetResultsTable(hiv_ref, hiv_ref_ly, hiv_ref_qaly, hiv_ref_cost, 
+                                 hiv_pv70, hiv_pv70_ly, hiv_pv70_qaly, hiv_pv70_cost)
+
+table_resultsNC <- GetResultsTable(hiv_ref, hiv_ref_ly, hiv_ref_qaly, hiv_ref_cost, 
+                                 hiv_pvNC, hiv_pvNC_ly, hiv_pvNC_qaly, hiv_pvNC_cost)
+
+# Quantity of vaccine delivered during time horizon
+series_delivered <- sum(hiv_pv$nVacc) # cumulative number of HIV vaccine series delivered
+
+doses_delivered <- sum(hiv_pv$nVacc)*5 # cumulative doses delivered
+
+
+hiv_prevalence_2018 <- hiv_ref %>%
+  mutate(prevalence = sum_Infected/(sum_Susceptible + sum_Infected)) %>% 
+  filter(Time == 2018) 
+```
+
+
+```{r Figure 5}
+# new figures added Jan 10, 2019
+
+ce_plane <- hiv_ref_cost %>% 
+  mutate(cost_ref = totalCost) %>%   
+  select(Time, cost_ref) %>% 
+  left_join(hiv_ref_qaly %>% 
+              mutate(qaly_ref = totalQALY) %>% 
+              select(Time, qaly_ref), by = "Time") %>% 
+  left_join(hiv_pv_cost %>% 
+              mutate(cost_pv = totalCost) %>% 
+              select(Time, cost_pv), by = "Time") %>% 
+  left_join(hiv_pv_qaly %>% 
+              mutate(qaly_pv = totalQALY) %>% 
+              select(Time, qaly_pv), by = "Time") %>% 
+  left_join(hiv_pv30_cost %>% 
+              mutate(cost_pv30 = totalCost) %>% 
+              select(Time, cost_pv30), by = "Time") %>% 
+  left_join(hiv_pv30_qaly %>% 
+              mutate(qaly_pv30 = totalQALY) %>% 
+              select(Time, qaly_pv30), by = "Time") %>% 
+    left_join(hiv_pv70_cost %>% 
+              mutate(cost_pv70 = totalCost) %>% 
+              select(Time, cost_pv70), by = "Time") %>% 
+  left_join(hiv_pv70_qaly %>% 
+              mutate(qaly_pv70 = totalQALY) %>% 
+              select(Time, qaly_pv70), by = "Time") %>% 
+  mutate(qaly_inc = qaly_pv - qaly_ref,
+         cost_inc = cost_pv - cost_ref,
+         qaly_30_inc = qaly_pv30 - qaly_ref,
+         cost_30_inc = cost_pv30 - cost_ref,
+         qaly_70_inc = qaly_pv70 - qaly_ref,
+         cost_70_inc = cost_pv70 - cost_ref,
+         #need the cumulative sum of costs and qalys
+         qaly_inc_cum = cumsum(qaly_inc),
+         cost_inc_cum = cumsum(cost_inc),
+         qaly_30_inc_cum = cumsum(qaly_30_inc),
+         cost_30_inc_cum = cumsum(cost_30_inc),
+         qaly_70_inc_cum = cumsum(qaly_70_inc),
+         cost_70_inc_cum = cumsum(cost_70_inc),
+         # per person cumulative sum of costs and qalys
+         qaly_inc_cum_pp = qaly_inc_cum/n.i,
+         cost_inc_cum_pp = cost_inc_cum/n.i,
+         icer = cost_inc_cum/qaly_inc_cum,
+         lower = 50000*qaly_70_inc_cum,
+         upper = 150000*qaly_70_inc_cum,
+         pickyear = ifelse(Time == 2025 | Time == 2030 |Time == 2035 | Time == 2040 | 
+                             Time == 2045, "True", "False"),
+         year = as.character(floor(Time)))
+
+ce_plane_brief <- ce_plane %>%
+  filter(pickyear == "True")
+
+
+ggplot(ce_plane_brief, aes(qaly_inc_cum, cost_inc_cum)) +
+  geom_ribbon(aes(x = qaly_70_inc_cum, ymin = lower, ymax = upper, 
+                  fill = "threshold"), alpha = .3) +
+  geom_line(aes(qaly_70_inc_cum, lower), color = "grey") +
+  geom_line(aes(qaly_70_inc_cum, upper), color = "grey") +
+  
+  geom_smooth(aes(color = "pv"), se = FALSE, size = 3) +
+  geom_smooth(aes(qaly_70_inc_cum, cost_70_inc_cum, color = "pv70"), se = FALSE, 
+              linetype = "dashed", size = 2) +  
+  geom_smooth(aes(qaly_30_inc_cum, cost_30_inc_cum, color = "pv30"), se = FALSE, 
+              linetype = "dashed", size = 2) +
+  
+  geom_point(aes(label = year), color = "dark red", size = 6) + 
+  geom_point(aes(qaly_70_inc_cum, cost_70_inc_cum), color = "#00CCCC", size = 6) +
+  geom_point(aes(qaly_30_inc_cum, cost_30_inc_cum), color = "orange", size = 6) +
+  geom_text(data = ce_plane_brief %>% 
+               filter(Time > 2034), aes(label=year),
+            hjust = 0.7, vjust = -1.5, size = 6) +
+  geom_text(data = ce_plane_brief %>% 
+               filter(Time > 2034), aes(qaly_70_inc_cum, cost_70_inc_cum, label = year), 
+            hjust = 0.5, vjust = -1.5, size = 6) +
+  geom_text(data = ce_plane_brief %>% 
+               filter(Time > 2034), aes(qaly_30_inc_cum, cost_30_inc_cum, label = year), 
+            hjust = 1.5, vjust = 0, size = 6) +
+  geom_text(data = ce_plane_brief %>% 
+               filter(Time < 2034), aes(qaly_70_inc_cum, cost_70_inc_cum, label = year), 
+            hjust = -.5, vjust = .5, size = 6) +
+  scale_y_continuous(labels = scales::dollar) +
+  scale_x_continuous(labels = scales::comma) +
+  labs(x = "QALYs Gained",
+       y = "Cost to Implement HIV Vaccines with PrEP ($)") +
+  scale_color_manual(values = c("pv30" = 'orange', "pv" = 'darkred', "pv70" = "#00CCCC"), 
+                     labels = c("50%", "30%", "70%"), name = "HIV Vaccine Efficacy") +
+  scale_fill_manual(values = c("threshold" = "grey70"), labels = c("1-3 x GDP per capita"), 
+                    name = "Threshold for Cost-Effectiveness") +
+  theme_bw() +  
+  theme(text = element_text(size = 20), legend.position="bottom")
+
+```
+
+
+
+## Main Results: 50% efficacy
+
+The model projects `r comma(series_delivered, 0)` vaccine HIV series delivered from 2025-2045, with a 
+total of `r comma(doses_delivered, 0)` doses delivered. 
+
+```{r}
+table_results %>%
+  kable() %>%
+  kable_styling()
+```
+
+# Sensitivity Analysis 
+
+## Results for HIV vaccine with 70% efficacy
+
+```{r}
+table_results70 %>%
+  kable() %>%
+  kable_styling()
+```
+
+## Results for HIV vaccine with 30% efficacy
+
+```{r}
+table_results30 %>%
+  kable() %>%
+  kable_styling()
+```
+
+## Scenario with no condom replacement
+
+```{r}
+table_resultsNC %>%
+  kable() %>%
+  kable_styling()
+```
+
+
+
+```{r sensitivity analysis, eval = FALSE}
+
+# SENSITIVITY ANALYSIS ---------------------------------------------------------
+cVaccine_base <- cVaccine
+cPrep_base <- cPrep
+
+cPrep <- cPrep_base*0.2
+C <- GetCostParams(prob = FALSE, nsims = 1, cVaccine = cVaccine, cPrep = cPrep, societal = FALSE)
+hiv_ref_cost <- CostingCalc(hiv_ref_ly, C)
+hiv_pv_cost <- CostingCalc(hiv_pv_ly, C)
+table_sa <- GetResultsTable(hiv_ref, hiv_ref_ly, hiv_ref_qaly, hiv_ref_cost, 
+                                 hiv_pv, hiv_pv_ly, hiv_pv_qaly, hiv_pv_cost)
+table_sa 
+
+# one way sensitivity analysis
+cVaccine <- cVaccine_base*0.575
+C <- GetCostParams(prob = FALSE, nsims = 1, cVaccine = cVaccine, cPrep = cPrep, societal = FALSE)
+hiv_ref_cost <- CostingCalc(hiv_ref_ly, C)
+hiv_pv_cost <- CostingCalc(hiv_pv_ly, C)
+table_sa <- GetResultsTable(hiv_ref, hiv_ref_ly, hiv_ref_qaly, hiv_ref_cost, 
+                            hiv_pv, hiv_pv_ly, hiv_pv_qaly, hiv_pv_cost)
+table_sa 
+
+#HEAT MAP
+v <- c(seq(from = 0, to = 3000, by = 120)) # cost of one vaccine dose
+
+p <- c(seq(from = 0, to = 7500, by = 300)) # monthly cost of prep
+
+sa <- matrix(c(rep(NA, length(v)*length(p))), nrow = length(v), ncol=length(p))
+
+row.names(sa) <- v
+
+colnames(sa) <- p
+
+sa[1,] <- p
+
+sa[,1] <- v
+
+sa
+
+for(x in 2:c(length(v))){
+  for(y in 2:c(length(p))){
+    cVaccine <- sa[x,1]
+    cPrep <- sa[1,y]
+    C <- GetCostParams(prob = FALSE, nsims = 1, cVaccine = cVaccine, cPrep = cPrep, societal = FALSE)
+    hiv_ref_cost <- CostingCalc(hiv_ref_ly, C)
+    hiv_pv_cost <- CostingCalc(hiv_pv_ly, C)
+    #ICER sensitivity analysis
+    sa[x,y] <- round((sum(hiv_pv_cost$totalCost[hiv_pv_cost$Time >= 2025]) 
+                      - sum(hiv_ref_cost$totalCost[hiv_ref_cost$Time >= 2025]))
+                     / (sum(hiv_pv_qaly$totalQALY[hiv_pv$Time>=2025]) 
+                        - sum(hiv_ref_qaly$totalQALY[hiv_ref$Time>=2025]))) # ICER row
+  }
+}
+
+#Reset to base case
+cPrep <- (1049.91*3) # FSS pricing of $1,049.91 from CCST in March 2018
+
+cVaccine <- (1623.72*(3/5)*1.3) #upfront one-time cost for 5-dose series of vaccine
+
+C <- GetCostParams(prob = FALSE, nsims = 1, cVaccine = cVaccine, cPrep = cPrep, societal = FALSE)
+
+hiv_ref_cost <- CostingCalc(hiv_ref_ly, C)
+
+hiv_pv_cost <- CostingCalc(hiv_pv_ly, C)
+
+head(sa)
+
+dim(sa)
+
+sa1 <- sa[2:dim(sa)[1],2:dim(sa)[2]]
+
+head(sa1)
+
+sa1 <- data.matrix(sa1)
+
+save(sa1, file = "heatmap2.rda") # save the sensitivity analysis data
+
+sa2 <- data.frame(sa1)
+
+head(sa2)
+
+mean(sa2$X600)
+
+sa3 <- melt(data.frame(sa), id.vars = "X0")
+
+sa3$cp <- as.numeric(gsub("X","",sa3$variable))/3 # 30-day supply of PrEP drugs
+
+sa3$cv <- sa3$X0*5 # cost of compelete 5-dose vaccine series
+
+sa3 <- sa3[sa3$cv != 0,]
+
+head(sa3)
+```
+
+```{r threshold analysis, eval = FALSE}
+# Threshold for cost-effectiveness
+
+v5 <- v*5
+v5 <- v5[-1]
+wtp <- rep(150000, length(v5))
+prepmax <- rep(NA,length(v5))
+threshold <- data.frame(v5, wtp, prepmax)
+threshold50 <- threshold
+head(threshold)
+for(i in v5){
+  threshold$prepmax[v5 == i] <- min(sa3$cp[sa3$cv==i & sa3$value < 150000])
+}
+for(i in v5){
+  threshold50$prepmax[v5 == i] <- min(sa3$cp[sa3$cv==i & sa3$value < 50000])
+}
+threshold <- threshold[threshold$prepmax != "Inf",]
+threshold50 <- threshold50[threshold50$prepmax != "Inf",]
+threshold50$prepmax[threshold50$prepmax == "Inf"] <- NA
+
+fig_heatmap <- ggplot(sa3, aes(cv,cp)) +
+  geom_tile(aes(fill = value), color = "white") + 
+  scale_fill_gradient(low = "darkblue", high = "red", labels = comma) +
+  geom_smooth(data = threshold, aes(x = v5, y = prepmax), se = FALSE, color = "gold") +
+  geom_smooth(data = threshold50, aes(x = v5, y = prepmax), se = FALSE, 
+              color = "gold", linetype = "dotted") +
+  ylab("PrEP Cost (30-day supply)") +
+  xlab("Vaccine Cost (per series)") +
+  geom_point(aes(x=cVaccine*5, y=cPrep/3), colour="gold", size = 3) +
+  theme(legend.title = element_text(size = 10),
+        legend.text = element_text(size = 12),
+        plot.title = element_text(size=16),
+        axis.title=element_text(size=14,face="bold"),
+        axis.text.x = element_text(angle = 90, hjust = 1)) +
+  scale_y_continuous(labels = scales::dollar) +
+  scale_x_continuous(labels = scales::dollar) +
+  labs(fill = "ICER ($/QALY)") +
+  theme_bw() 
+  
+# "steelblue" color also looks nice
+
+fig_heatmap
+
+# ------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
+### TO DO LIST: compare distribution of cd4 counts to the NYC distributions
+### show how much closer this gets us to eradication or 90:90:90 goals
+```
+
